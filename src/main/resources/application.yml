@@ -1,0 +1,74 @@
+server:
+  port: 8080
+  netty:
+    connection-timeout: 5s
+
+spring:
+  application:
+    name: zero-trust-gateway
+  data:
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:localhost}
+      port: ${SPRING_DATA_REDIS_PORT:6379}
+      timeout: 2s
+  kafka:
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: all
+      retries: 3
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+
+gateway:
+  jwt:
+    secret: ${GATEWAY_JWT_SECRET:change-me-in-production-this-must-be-at-least-256-bits-long-for-hs256}
+    expiration-ms: 3600000
+    issuer: zero-trust-gateway
+  rate-limit:
+    default-rpm: 60
+    burst-size: 10
+    window-size-seconds: 60
+  geo:
+    maxmind-db-path: ${GEOIP_DB_PATH:}
+    impossible-travel-threshold-kmh: 900
+  threat:
+    model-path: ${ONNX_MODEL_PATH:}
+    low-threshold: 60
+    medium-threshold: 80
+    feature-window-seconds: 10
+  circuit-breaker:
+    failure-threshold: 5
+    half-open-timeout-ms: 30000
+    success-threshold: 3
+  routes:
+    - id: payment-service
+      path-prefix: /api/payments
+      target-url: ${PAYMENT_SERVICE_URL:http://payment-service:5678}
+    - id: user-service
+      path-prefix: /api/users
+      target-url: ${USER_SERVICE_URL:http://user-service:5678}
+    - id: order-service
+      path-prefix: /api/orders
+      target-url: ${ORDER_SERVICE_URL:http://order-service:5678}
+  shadow:
+    enabled: false
+    target-url: ${SHADOW_SERVICE_URL:http://localhost:9999}
+  chaos:
+    enabled: false
+    latency-ms: 0
+    error-rate: 0.0
+
+logging:
+  level:
+    com.ztgateway: DEBUG
+    org.springframework.web: INFO
