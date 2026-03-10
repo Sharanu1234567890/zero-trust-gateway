@@ -2,312 +2,415 @@
 
 Click Hear to Test -> http://57.180.37.25/api/auth/token
 
-/ production-grade security infrastructure
-Zero Trust
-API Gateway
-Spring Boot · Redis · Kafka · PostgreSQL · ONNX · MaxMind
-Java 17
-Spring Boot 3.2
-Reactive / WebFlux
-Zero Trust
-ML Threat Detection
-Docker Ready
-01 — Architecture
-Request Pipeline
-CLIENT
-──────►
-:8080 GATEWAY
-▼
-① Audit
-→
-② Rate Limit
-→
-③ JWT Auth
-→
-④ Geo Block
-→
-⑤ Proxy Route
-▼
-/api/payments
-/api/users
-/api/orders
-Redis
-Rate Limits · Tokens · CB
-Kafka
-Audit Events
-Postgres
-Audit Logs · Geo · Schema
-Prometheus
-Metrics · Grafana
-02 — Filter Chain
-Security Layers
-①
-AuditFilter — @Order(5)
-Assigns a UUID to every request. Records method, path, client IP, user ID, response status, and latency. Publishes an AuditEvent to Kafka topic gateway-audit after the response is committed.
-Topic: gateway-audit  |  Fail: open
-②
-RateLimitFilter — @Order(10)
-Sliding-window counter in Redis. Key is user:{userId} when authenticated or ip:{clientIp} for anonymous requests. Adds X-RateLimit-Remaining and X-RateLimit-Limit headers. Returns 429 on breach.
-Default: 60 RPM · Burst: 10 · Window: 60s
-③
-JwtAuthFilter — @Order(20)
-Validates HS256 JWT from Authorization: Bearer <token>. Checks issuer, expiry, and Redis blacklist (by JTI). Mutates the request to add X-User-Id, X-User-Role, X-Token-Jti headers for downstream. Skips public paths.
-Public paths: /auth/**, /actuator/health, /actuator/prometheus
-④
-GeoBlockFilter — @Order(30)
-Reads country from CF-IPCountry or X-Country-Code header. Checks against Redis-cached blocked countries and hardcoded OFAC sanctions list. Returns 403 for blocked regions. Fails open if geo headers are absent.
-Blocked by default: KP, IR, SY (OFAC sanctions)
-⑤
-GatewayRoutingFilter — Proxy
-Matches request path to configured route. Checks circuit breaker state (Redis). Forwards via WebClient, strips hop-by-hop headers, pipes response body. Records success/failure to circuit breaker. Returns 503 if CB is OPEN, 502 on network error.
-CB threshold: 5 failures · Half-open timeout: 30s
-03 — Endpoints
-All Routes
-🔐 Auth  —  /auth/**
-POST
-/auth/login
-Issue JWT token · body: {username, password}
-Public
-POST
-/auth/register
-Register new user · body: {username, password, email}
-Public
-POST
-/auth/logout
-Blacklist current JWT by JTI in Redis
-JWT
-POST
-/auth/refresh
-Rotate token — old JTI blacklisted, new token issued
-JWT
-GET
-/auth/validate
-Validate token · returns claims, expiry, role
-JWT
-🌐 Proxied Routes  —  /api/**
-ANY
-/api/payments/**
-Proxied → payment-service:5678 · circuit-breaker guarded
-JWT
-ANY
-/api/users/**
-Proxied → user-service:5678 · circuit-breaker guarded
-JWT
-ANY
-/api/orders/**
-Proxied → order-service:5678 · circuit-breaker guarded
-JWT
-🛠️ Admin  —  /admin/**
-GET
-/admin/health
-Gateway status, version, timestamp
-Admin
-GET
-/admin/routes
-List all configured proxy routes with targets
-Admin
-GET
-/admin/circuit-breaker/{serviceId}
-Get current circuit breaker state (OPEN / CLOSED)
-Admin
-POST
-/admin/circuit-breaker/{serviceId}/reset
-Force circuit breaker to CLOSED state
-Admin
-POST
-/admin/token/revoke
-Blacklist token by JTI · body: {jti, userId, ttlMs?}
-Admin
-GET
-/admin/rate-limit/{key}
-Remaining quota for a given rate-limit key
-Admin
-GET
-/admin/config
-View live config — JWT, rate limits, CB settings (secret hidden)
-Admin
-📊 System  —  Public
-GET
-/health
-Simple liveness probe
-Public
-GET
-/info
-Service name, version, route count
-Public
-GET
-/actuator/health
-Spring Boot health indicator
-Public
-GET
-/actuator/prometheus
-Prometheus metrics scrape endpoint
-Public
-GET
-/actuator/metrics
-Spring Micrometer metrics
-Public
-04 — Quick Start
-Get Running in 60 Seconds
-1
-Clone & configure
-terminal
-# Set required secrets export JWT_SECRET="your-256-bit-secret-key-here-must-be-long-enough" export POSTGRES_PASSWORD="strong-db-password"
-2
-Start the full stack
-terminal
-docker-compose up --build # Starts: gateway · redis · postgres · kafka · zookeeper · grafana · prometheus # + dummy payment / user / order services for testing
-3
-Login and call an API
-curl
-# 1. Get a token curl -X POST http://localhost:8080/auth/login \ -H "Content-Type: application/json" \ -d '{"username":"admin","password":"any"}' # 2. Call a proxied route curl http://localhost:8080/api/payments \ -H "Authorization: Bearer <token>"
-⚠ Production Warning: The default JWT secret in application.yml is insecure. Always override GATEWAY_JWT_SECRET and POSTGRES_PASSWORD via environment variables before deploying.
-05 — Stack
-Technology
-⚡
-Spring WebFlux
-Reactive gateway runtime
-Spring Boot 3.2.4
-⚡
-Redis
-Rate limiting · token blacklist · circuit breaker state
-7-alpine · Reactive client
-📨
-Kafka
-Async audit event streaming
-Confluent 7.6 · Spring Kafka
-🗄️
-PostgreSQL
-Audit log · geo history · model versions
-16-alpine
-🔑
-JJWT
-HS256 JWT signing & validation
-0.12.5
-🤖
-ONNX Runtime
-ML threat scoring inference
-1.17.0 · Microsoft
-🗺️
-MaxMind GeoIP2
-IP geolocation · impossible travel
-4.2.0
-📊
-Prometheus + Grafana
-Metrics scrape · dashboards
-Prometheus 2.50 · Grafana 10.3
-06 — Database
-Schema Overview
-audit_log
-id PK
-BIGSERIAL
-request_id
-UUID
-client_ip
-VARCHAR(45)
-user_id
-VARCHAR(255)
-decision
-VARCHAR(16)
-threat_score
-DOUBLE
-details
-JSONB
-token_blacklist
-jti PK
-VARCHAR(255)
-user_id
-VARCHAR(255)
-blacklisted_at
-TIMESTAMPTZ
-expires_at
-TIMESTAMPTZ
-user_behavior_profile
-user_id PK
-VARCHAR(255)
-typical_user_agents
-TEXT[]
-typical_hours
-INT[]
-avg_request_rate
-DOUBLE
-last_known_ip
-VARCHAR(45)
-circuit_breaker_state
-service_name PK
-VARCHAR(255)
-state
-VARCHAR(16)
-failure_count
-INT
-opened_at
-TIMESTAMPTZ
-half_open_at
-TIMESTAMPTZ
-geo_login_history
-id PK
-BIGSERIAL
-user_id
-VARCHAR(255)
-ip_address
-VARCHAR(45)
-country_code
-VARCHAR(3)
-latitude / longitude
-DOUBLE
-model_versions
-id PK
-BIGSERIAL
-model_name
-VARCHAR(255)
-version
-VARCHAR(64)
-accuracy
-DOUBLE
-is_active
-BOOLEAN
-07 — Ports
-Service Map
-Port	Service	Notes
-8080	Zero Trust Gateway	Main entry point — all traffic flows through here
-6379	Redis	Rate limits, token blacklist, circuit breaker state
-5432	PostgreSQL	Audit logs, geo history, model versions
-9092	Kafka	Audit event streaming topic: gateway-audit
-3000	Grafana	Dashboards — default admin/admin
-9090	Prometheus	Scrapes /actuator/prometheus every 15s
-5678	payment-service (mock)	hashicorp/http-echo stub
-5679	user-service (mock)	hashicorp/http-echo stub
-5680	order-service (mock)	hashicorp/http-echo stub
-08 — Security Features
-Zero Trust Controls
-🔐
-JWT Authentication
-HS256 signed tokens. Configurable expiry (default 1h). Claims carry userId and role. Every token has a JTI for precise revocation.
-⏱️
-Rate Limiting
-Redis sliding window. 60 RPM per user or IP. Burst of 10 requests. Remaining quota returned in response headers.
-🚫
-Token Revocation
-JTI blacklist in Redis with TTL matching token expiry. Supports instant logout and admin-forced revocation.
-🌍
-Geo Blocking
-Country-level access control via CF-IPCountry or X-Country-Code headers. Redis-cached block list. OFAC sanctions enforced by default.
-⚡
-Circuit Breaker
-Per-service state machine in Redis. CLOSED → OPEN after 5 failures. HALF_OPEN after 30s timeout. Returns 503 when open.
-📋
-Full Audit Trail
-Every request logged to Kafka with UUID, IP, user, method, path, status, and latency. Async — never blocks the request path.
-🤖
-ML Threat Scoring
-ONNX Runtime inference for real-time threat detection. Low threshold at 60, medium at 80. Pluggable model with version tracking in DB.
-🗺️
-Impossible Travel
-Flags logins that are geographically impossible given the time since last login. Threshold: 900 km/h. Powered by MaxMind GeoIP2.
-09 — Configuration
-Environment Variables
-.env
-# ── Required in production ────────────────────────────────── GATEWAY_JWT_SECRET=your-256-bit-minimum-secret-for-hs256-signing POSTGRES_PASSWORD=strong-random-password # ── Service URLs (defaults shown) ─────────────────────────── PAYMENT_SERVICE_URL=http://payment-service:5678 USER_SERVICE_URL=http://user-service:5678 ORDER_SERVICE_URL=http://order-service:5678 # ── Optional ML / Geo ──────────────────────────────────────── ONNX_MODEL_PATH=/models/threat-detector.onnx GEOIP_DB_PATH=/data/GeoLite2-City.mmdb # ── Shadow / Chaos (testing only) ──────────────────────────── SHADOW_SERVICE_URL=http://shadow-svc:9999
-ℹ Chaos Engineering: Set gateway.chaos.enabled=true with latency-ms and error-rate to inject faults for resilience testing. Never enable in production.
-ZTGateway
-Zero Trust API Gateway  ·  v1.0.0-SNAPSHOT
+<div align="center">
+
+```
+███████╗███████╗██████╗  ██████╗      ████████╗██████╗ ██╗   ██╗███████╗████████╗
+╚══███╔╝██╔════╝██╔══██╗██╔═══██╗        ██╔══╝██╔══██╗██║   ██║██╔════╝╚══██╔══╝
+  ███╔╝ █████╗  ██████╔╝██║   ██║        ██║   ██████╔╝██║   ██║███████╗   ██║   
+ ███╔╝  ██╔══╝  ██╔══██╗██║   ██║        ██║   ██╔══██╗██║   ██║╚════██║   ██║   
+███████╗███████╗██║  ██║╚██████╔╝        ██║   ██║  ██║╚██████╔╝███████║   ██║   
+╚══════╝╚══════╝╚═╝  ╚═╝ ╚═════╝         ╚═╝   ╚═╝  ╚═╝ ╚═════╝ ╚══════╝   ╚═╝  
+```
+
+# ⚡ Zero Trust API Gateway
+
+**Production-grade reactive API gateway with JWT auth, ML threat detection, geo-blocking, and circuit breaking**
+
+[![Java 17](https://img.shields.io/badge/Java-17-orange?style=flat-square&logo=openjdk)](https://openjdk.org/)
+[![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.2.4-brightgreen?style=flat-square&logo=springboot)](https://spring.io/projects/spring-boot)
+[![WebFlux](https://img.shields.io/badge/Reactive-WebFlux-blue?style=flat-square&logo=spring)](https://docs.spring.io/spring-framework/reference/web/webflux.html)
+[![Redis](https://img.shields.io/badge/Redis-7-red?style=flat-square&logo=redis)](https://redis.io/)
+[![Kafka](https://img.shields.io/badge/Kafka-7.6-black?style=flat-square&logo=apachekafka)](https://kafka.apache.org/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-blue?style=flat-square&logo=postgresql)](https://www.postgresql.org/)
+[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=flat-square&logo=docker)](https://www.docker.com/)
+[![Live](https://img.shields.io/badge/Live-57.180.37.25-success?style=flat-square)](http://57.180.37.25)
+
+> **Never trust. Always verify.** Every request is authenticated, rate-limited, geo-checked, and threat-scored before it ever reaches your services.
+
+</div>
+
+---
+
+## 📡 Live Server
+
+```
+http://57.180.37.25
+```
+
+Test it right now:
+
+```bash
+# Get a token
+curl -X POST http://57.180.37.25/api/auth/token \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"admin"}'
+
+# Call a protected route
+curl http://57.180.37.25/api/payments \
+  -H "Authorization: Bearer <your_token>"
+```
+
+---
+
+## 🗺️ Architecture
+
+```
+                          ┌─────────────────────────────────────────────┐
+  CLIENT ──────────────►  │           ZERO TRUST GATEWAY :8080           │
+                          │                                               │
+                          │  ① AuditFilter        (@Order 5)             │
+                          │       ↓                                       │
+                          │  ② RateLimitFilter    (@Order 10)  ←→ Redis  │
+                          │       ↓                                       │
+                          │  ③ JwtAuthFilter      (@Order 20)  ←→ Redis  │
+                          │       ↓                                       │
+                          │  ④ GeoBlockFilter     (@Order 30)  ←→ Redis  │
+                          │       ↓                                       │
+                          │  ⑤ GatewayRoutingFilter (Proxy)              │
+                          └──────────────┬──────────────────────────────-┘
+                                         │
+                  ┌──────────────────────┼──────────────────────┐
+                  ▼                      ▼                       ▼
+          payment-service:5678   user-service:5678      order-service:5678
+
+
+  Supporting Infrastructure:
+  ┌─────────┐  ┌──────────┐  ┌──────────────┐  ┌──────────────────┐
+  │  Redis  │  │ Postgres │  │    Kafka     │  │ Prometheus+Grafana│
+  │  :6379  │  │  :5432   │  │    :9092     │  │   :9090 / :3000  │
+  └─────────┘  └──────────┘  └──────────────┘  └──────────────────┘
+```
+
+---
+
+## 🔗 All Endpoints
+
+### 🔐 Auth — `/auth/**`  *(No token required)*
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/auth/login` | Issue JWT · body: `{"username","password"}` |
+| `POST` | `/auth/register` | Register user · body: `{"username","password","email"}` |
+| `POST` | `/auth/logout` | Blacklist current token JTI in Redis |
+| `POST` | `/auth/refresh` | Rotate token — old JTI blacklisted, new one issued |
+| `GET`  | `/auth/validate` | Validate token · returns claims, expiry, role |
+
+**Login example:**
+```bash
+curl -X POST http://57.180.37.25/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username": "admin", "password": "admin"}'
+```
+```json
+{
+  "access_token": "eyJhbGciOiJIUzI1NiJ9...",
+  "token_type": "Bearer",
+  "expires_in": 3600,
+  "user_id": "admin",
+  "role": "ADMIN"
+}
+```
+
+---
+
+### 🌐 Proxied Routes — `/api/**`  *(JWT required)*
+
+| Method | Endpoint | Routes To | Circuit Breaker |
+|--------|----------|-----------|-----------------|
+| `ANY` | `/api/payments/**` | `payment-service:5678` | ✅ Guarded |
+| `ANY` | `/api/users/**` | `user-service:5678` | ✅ Guarded |
+| `ANY` | `/api/orders/**` | `order-service:5678` | ✅ Guarded |
+
+```bash
+curl http://57.180.37.25/api/payments \
+  -H "Authorization: Bearer <token>"
+```
+
+---
+
+### 🛠️ Admin — `/admin/**`  *(JWT required)*
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET`  | `/admin/health` | Gateway status, version, timestamp |
+| `GET`  | `/admin/routes` | List all configured proxy routes |
+| `GET`  | `/admin/circuit-breaker/{serviceId}` | Get CB state: `OPEN` or `CLOSED` |
+| `POST` | `/admin/circuit-breaker/{serviceId}/reset` | Force circuit breaker to CLOSED |
+| `POST` | `/admin/token/revoke` | Blacklist a token by JTI · body: `{"jti","userId","ttlMs?"}` |
+| `GET`  | `/admin/rate-limit/{key}` | Remaining quota for a rate-limit key |
+| `GET`  | `/admin/config` | Live config snapshot (JWT secret excluded) |
+
+---
+
+### 📊 System — *(Public)*
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/health` | Liveness probe |
+| `GET` | `/info` | Service name, version, route count |
+| `GET` | `/actuator/health` | Spring Boot health indicator |
+| `GET` | `/actuator/prometheus` | Prometheus metrics scrape |
+| `GET` | `/actuator/metrics` | Micrometer metrics |
+
+---
+
+## 🛡️ Security Filter Chain
+
+```
+Request In
+    │
+    ▼
+┌─────────────────────────────────────────────────┐
+│  ① AUDIT  (Order 5)                              │
+│  Assigns UUID · records IP, method, path, user   │
+│  Publishes AuditEvent to Kafka after response    │
+└────────────────────────┬────────────────────────┘
+                         ▼
+┌─────────────────────────────────────────────────┐
+│  ② RATE LIMIT  (Order 10)                        │
+│  Key: user:{id} or ip:{addr}  →  Redis counter   │
+│  60 RPM / 60s window  →  429 on breach           │
+│  Adds X-RateLimit-Remaining header               │
+└────────────────────────┬────────────────────────┘
+                         ▼
+┌─────────────────────────────────────────────────┐
+│  ③ JWT AUTH  (Order 20)                          │
+│  Validates HS256 token + issuer + expiry         │
+│  Checks JTI against Redis blacklist              │
+│  Injects X-User-Id, X-User-Role, X-Token-Jti    │
+│  Skips: /auth/**, /actuator/health               │
+└────────────────────────┬────────────────────────┘
+                         ▼
+┌─────────────────────────────────────────────────┐
+│  ④ GEO BLOCK  (Order 30)                         │
+│  Reads CF-IPCountry or X-Country-Code header     │
+│  Redis-cached block list + OFAC hardcoded        │
+│  Blocked by default: KP, IR, SY  →  403          │
+│  Fails open if no geo header present             │
+└────────────────────────┬────────────────────────┘
+                         ▼
+┌─────────────────────────────────────────────────┐
+│  ⑤ PROXY ROUTE                                   │
+│  Matches path prefix to route config             │
+│  Checks circuit breaker state (Redis)  →  503    │
+│  Forwards via WebClient, pipes response          │
+│  Records success/failure to circuit breaker      │
+└─────────────────────────────────────────────────┘
+```
+
+---
+
+## ⚡ Quick Start
+
+**1. Clone and set secrets**
+```bash
+export JWT_SECRET="your-256-bit-minimum-secret-for-hs256-algorithm"
+export POSTGRES_PASSWORD="strong-random-password"
+```
+
+**2. Start full stack**
+```bash
+docker-compose up --build
+```
+
+This spins up: Gateway · Redis · PostgreSQL · Kafka · Zookeeper · Grafana · Prometheus · 3 mock services
+
+**3. Verify it's running**
+```bash
+curl http://localhost:8080/health
+# {"status":"UP","timestamp":"2026-03-11T..."}
+```
+
+---
+
+## 🏗️ Project Structure
+
+```
+zero-trust-gateway/
+├── src/main/java/com/ztgateway/
+│   ├── ZeroTrustGatewayApplication.java   ← Entry point
+│   ├── config/
+│   │   ├── GatewayProperties.java         ← All config bindings
+│   │   ├── KafkaConfig.java               ← Kafka producer setup
+│   │   ├── RedisConfig.java               ← Reactive Redis template
+│   │   ├── SecurityConfig.java            ← CORS configuration
+│   │   └── WebClientConfig.java           ← WebClient for proxying
+│   ├── controller/
+│   │   ├── AuthController.java            ← /auth/** endpoints
+│   │   ├── AdminController.java           ← /admin/** endpoints
+│   │   ├── HealthController.java          ← /health, /info
+│   │   └── GatewayRoutingFilter.java      ← /api/** proxy routing
+│   ├── filter/
+│   │   ├── AuditFilter.java               ← Order 5 — request logging
+│   │   ├── RateLimitFilter.java           ← Order 10 — Redis rate limit
+│   │   ├── JwtAuthFilter.java             ← Order 20 — JWT validation
+│   │   └── GeoBlockFilter.java            ← Order 30 — country blocking
+│   ├── service/
+│   │   ├── JwtService.java                ← Token issue / validate / parse
+│   │   ├── RateLimiterService.java        ← Sliding window counter
+│   │   ├── TokenBlacklistService.java     ← JTI blacklist in Redis
+│   │   ├── CircuitBreakerService.java     ← CB state machine in Redis
+│   │   ├── AuditService.java              ← Kafka event publisher
+│   │   └── ProxyService.java              ← WebClient request forwarding
+│   ├── model/
+│   │   └── AuditEvent.java                ← Kafka event payload
+│   └── util/
+│       ├── FilterOrder.java               ← Order constants
+│       └── ResponseUtils.java             ← JSON error responses
+├── src/main/resources/
+│   └── application.yml                    ← All configuration
+├── scripts/
+│   ├── init.sql                           ← PostgreSQL schema
+│   └── prometheus.yml                     ← Metrics scrape config
+├── Dockerfile                             ← Multi-stage build
+└── docker-compose.yml                     ← Full infra stack
+```
+
+---
+
+## 🗄️ Database Schema
+
+```sql
+audit_log              -- Every request logged with threat score + decision
+token_blacklist        -- Revoked JTIs with TTL
+user_behavior_profile  -- Typical agents, hours, routes per user
+geo_login_history      -- IP + lat/lon login history for travel detection
+blocked_countries      -- Country-level access control (KP, IR, SY default)
+circuit_breaker_state  -- Per-service CB state + failure count
+model_versions         -- ONNX model registry with accuracy tracking
+```
+
+---
+
+## 🚢 Service Ports
+
+| Port | Service | Notes |
+|------|---------|-------|
+| `8080` | **Zero Trust Gateway** | Main entry point |
+| `6379` | Redis | Rate limits · token blacklist · circuit breaker |
+| `5432` | PostgreSQL | Audit logs · geo history · schema |
+| `9092` | Kafka | Audit events → topic `gateway-audit` |
+| `3000` | Grafana | Dashboards · default `admin/admin` |
+| `9090` | Prometheus | Scrapes `/actuator/prometheus` every 15s |
+| `5678` | payment-service (mock) | `hashicorp/http-echo` stub |
+| `5679` | user-service (mock) | `hashicorp/http-echo` stub |
+| `5680` | order-service (mock) | `hashicorp/http-echo` stub |
+
+---
+
+## ⚙️ Configuration Reference
+
+```yaml
+gateway:
+  jwt:
+    secret: ${GATEWAY_JWT_SECRET}     # ⚠ Must be 256-bit minimum
+    expiration-ms: 3600000            # 1 hour
+    issuer: zero-trust-gateway
+
+  rate-limit:
+    default-rpm: 60                   # Requests per minute
+    burst-size: 10
+    window-size-seconds: 60
+
+  circuit-breaker:
+    failure-threshold: 5              # Failures before OPEN
+    half-open-timeout-ms: 30000       # 30s before retry
+    success-threshold: 3
+
+  threat:
+    low-threshold: 60                 # ONNX model score thresholds
+    medium-threshold: 80
+
+  geo:
+    impossible-travel-threshold-kmh: 900
+```
+
+### Environment Variables
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `GATEWAY_JWT_SECRET` | ✅ **Yes** | insecure fallback | HS256 signing key (min 256 bits) |
+| `POSTGRES_PASSWORD` | ✅ **Yes** | `gateway_secret` | Database password |
+| `PAYMENT_SERVICE_URL` | No | `http://payment-service:5678` | Payment backend |
+| `USER_SERVICE_URL` | No | `http://user-service:5678` | User backend |
+| `ORDER_SERVICE_URL` | No | `http://order-service:5678` | Order backend |
+| `ONNX_MODEL_PATH` | No | *(disabled)* | Path to threat detection model |
+| `GEOIP_DB_PATH` | No | *(disabled)* | MaxMind GeoLite2 database path |
+| `SHADOW_SERVICE_URL` | No | *(disabled)* | Traffic mirroring target |
+
+---
+
+## 🔬 Tech Stack
+
+| Layer | Technology | Version |
+|-------|-----------|---------|
+| Runtime | Spring Boot WebFlux (Netty) | 3.2.4 |
+| Language | Java | 17 |
+| Cache / State | Redis (Reactive) | 7-alpine |
+| Messaging | Apache Kafka | Confluent 7.6 |
+| Database | PostgreSQL | 16-alpine |
+| Auth | JJWT (HS256) | 0.12.5 |
+| ML Inference | ONNX Runtime | 1.17.0 |
+| Geolocation | MaxMind GeoIP2 | 4.2.0 |
+| Metrics | Micrometer + Prometheus | — |
+| Dashboards | Grafana | 10.3.1 |
+| Build | Maven + Docker multi-stage | — |
+
+---
+
+## ⚠️ Security Notes
+
+> **Never deploy with default secrets.**
+
+- Override `GATEWAY_JWT_SECRET` — the fallback in `application.yml` is public and insecure
+- Override `POSTGRES_PASSWORD` — default `gateway_secret` is not safe
+- Change Grafana default password (`admin/admin`) before exposing port 3000
+- Kafka uses `PLAINTEXT` — add TLS before exposing to the internet
+- Chaos mode (`gateway.chaos.enabled`) must never be enabled in production
+
+---
+
+## 🧪 Testing All Endpoints
+
+```bash
+BASE=http://57.180.37.25
+
+# 1. Health check (public)
+curl $BASE/health
+
+# 2. Login
+TOKEN=$(curl -s -X POST $BASE/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"admin"}' | grep -o '"access_token":"[^"]*"' | cut -d'"' -f4)
+
+# 3. Validate token
+curl $BASE/auth/validate -H "Authorization: Bearer $TOKEN"
+
+# 4. Call proxied services
+curl $BASE/api/payments -H "Authorization: Bearer $TOKEN"
+curl $BASE/api/users    -H "Authorization: Bearer $TOKEN"
+curl $BASE/api/orders   -H "Authorization: Bearer $TOKEN"
+
+# 5. Admin — circuit breaker state
+curl $BASE/admin/circuit-breaker/payment-service -H "Authorization: Bearer $TOKEN"
+
+# 6. Admin — config
+curl $BASE/admin/config -H "Authorization: Bearer $TOKEN"
+
+# 7. Logout (blacklists token)
+curl -X POST $BASE/auth/logout -H "Authorization: Bearer $TOKEN"
+
+# 8. Prometheus metrics
+curl $BASE/actuator/prometheus
+```
+
+---
+
+<div align="center">
+
+**Zero Trust API Gateway** · v1.0.0 · Java 17 · Spring Boot 3.2 · Reactive
+
+*"Never trust. Always verify."*
+
+</div>
