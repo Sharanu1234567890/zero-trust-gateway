@@ -13,7 +13,7 @@ Click Hear to Test -> http://57.180.37.25/api/auth/token
 ╚══════╝╚══════╝╚═╝  ╚═╝ ╚═════╝         ╚═╝   ╚═╝  ╚═╝ ╚═════╝ ╚══════╝   ╚═╝  
 ```
 
-# ⚡ Zero Trust API Gateway
+#  Zero Trust API Gateway
 
 **Production-grade reactive API gateway with JWT auth, ML threat detection, geo-blocking, and circuit breaking**
 
