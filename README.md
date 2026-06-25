@@ -1,7 +1,7 @@
 # Zero Trust API Gateway
 
 
-                                                                    
+                                                                        
 <div align="center">  
   
 ```  
